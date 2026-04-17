@@ -228,6 +228,8 @@ with tab1:
 # ==========================================
 # TAB 2
 # ==========================================
+from lime.lime_text import LimeTextExplainer
+
 with tab2:
 
     if "raw_text" not in st.session_state or "label" not in st.session_state:
@@ -273,14 +275,21 @@ with tab2:
         # ================= MALICIOUS DETECTION =================
         st.subheader("🚨 Malicious Analysis")
 
+        # INIT CACHE VARIABLES
+        st.session_state["cleaned_text"] = cleaned
+        st.session_state["malicious_label"] = "unknown"
+        st.session_state["malicious_score"] = 0.0
+        st.session_state["lime_tokens"] = []
+
         if not cleaned or len(cleaned) < 5:
             st.warning("Text too small for analysis")
         else:
             try:
-                # -------- LOAD MODEL BASED ON LABEL --------
                 if label in ["url", "js", "html", "ps"]:
 
                     from transformers import pipeline
+
+                    hf_token = st.secrets["HF_TOKEN"]
 
                     model_map = {
                         "url": "Arch11yad/url_malicious_detect",
@@ -289,24 +298,81 @@ with tab2:
                         "ps": "Arch11yad/powershell_final",
                     }
 
-                    from transformers import pipeline
-
-                    hf_token = st.secrets["HF_TOKEN"]
-                    
                     classifier = pipeline(
                         "text-classification",
                         model=model_map[label],
                         token=hf_token
                     )
 
-                    result = classifier(cleaned[:512])[0]
+                    result = classifier(cleaned[:512], top_k=None)[0]
 
-                    st.success(f"Prediction: {result['label']}")
-                    st.write("Confidence:", round(result["score"], 3))
+                    # -------- Normalize output --------
+                    score_map = {"safe": 0.5, "malicious": 0.5}
+
+                    for item in result:
+                        lbl = item["label"].lower()
+                        score = float(item["score"])
+
+                        if "safe" in lbl or lbl.endswith("0"):
+                            score_map["safe"] = score
+                        elif "mal" in lbl or lbl.endswith("1"):
+                            score_map["malicious"] = score
+
+                    safe_score = score_map["safe"]
+                    mal_score = score_map["malicious"]
+
+                    final_label = "malicious" if mal_score > safe_score else "safe"
+                    confidence = max(safe_score, mal_score)
+
+                    st.success(f"Prediction: {final_label.upper()}")
+                    st.write("Confidence:", round(confidence, 3))
+
+                    # SAVE
+                    st.session_state["malicious_label"] = final_label
+                    st.session_state["malicious_score"] = confidence
+
+                    # ================= LIME =================
+                    st.subheader("🧠 Important Tokens (LIME)")
+
+                    explainer = LimeTextExplainer(class_names=["safe", "malicious"])
+
+                    def predict_proba(texts):
+                        probs = []
+                        for t in texts:
+                            res = classifier(t[:512], top_k=None)[0]
+
+                            temp = {"safe": 0.5, "malicious": 0.5}
+
+                            for item in res:
+                                lbl = item["label"].lower()
+                                score = float(item["score"])
+
+                                if "safe" in lbl or lbl.endswith("0"):
+                                    temp["safe"] = score
+                                elif "mal" in lbl or lbl.endswith("1"):
+                                    temp["malicious"] = score
+
+                            probs.append([temp["safe"], temp["malicious"]])
+
+                        return np.array(probs)
+
+                    exp = explainer.explain_instance(
+                        cleaned[:512],
+                        predict_proba,
+                        num_features=10
+                    )
+
+                    lime_tokens = exp.as_list()
+
+                    # SAVE TOKENS
+                    st.session_state["lime_tokens"] = lime_tokens
+
+                    for word, weight in lime_tokens:
+                        st.write(f"{word} → {round(weight, 3)}")
 
                 elif label == "eth":
 
-                    # -------- ETH FTTransformer --------
+                    # -------- ETH MODEL --------
                     class FTTransformer(nn.Module):
                         def __init__(self, input_dim=1, d_model=64, n_heads=4, n_layers=2):
                             super().__init__()
@@ -341,10 +407,16 @@ with tab2:
                         logits = eth_model(x)
                         probs = torch.softmax(logits, dim=1)[0]
 
-                    pred = "Malicious" if probs[1] > 0.5 else "Safe"
+                    pred = "malicious" if probs[1] > 0.5 else "safe"
+                    confidence = float(probs[1])
 
-                    st.success(f"Prediction: {pred}")
-                    st.write("Confidence:", float(probs[1]))
+                    st.success(f"Prediction: {pred.upper()}")
+                    st.write("Confidence:", round(confidence, 3))
+
+                    # SAVE
+                    st.session_state["malicious_label"] = pred
+                    st.session_state["malicious_score"] = confidence
+                    st.session_state["lime_tokens"] = []  # EMPTY FOR ETH
 
                 else:
                     st.info("No model available for this type")
