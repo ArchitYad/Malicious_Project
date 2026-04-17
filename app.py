@@ -218,3 +218,45 @@ if uploaded:
 
     st.subheader("📊 Probabilities")
     st.write(probs)
+
+with tab2:
+
+    if "raw_text" not in st.session_state:
+        st.warning("Upload image first in Tab 1")
+    else:
+        raw_text = st.session_state["raw_text"]
+        label = st.session_state["label"]
+
+        st.subheader("Detected Type")
+        st.write(label.upper())
+
+        # ===== CLEAN BASED ON LABEL =====
+        def clean_text_by_label(text, label):
+
+            if label == "url":
+                match = re.search(r"https?://[^\s'\"<>]+", text)
+                return match.group(0) if match else ""
+
+            elif label == "html":
+                match = re.search(r"(<.*(?:</html>|</script>))", text, re.DOTALL | re.IGNORECASE)
+                return match.group(1) if match else ""
+
+            elif label == "js":
+                cleaned = text.replace("?", "")
+                cleaned = "".join(c for c in cleaned if c.isprintable() or c in "\n\r\t")
+                return cleaned.strip()
+
+            elif label == "eth":
+                match = re.search(r"0x[a-fA-F0-9]{40}", text)
+                return match.group(0) if match else ""
+
+            elif label == "ps":
+                cleaned = "".join(c for c in text if c.isprintable() or c in "\n\r\t")
+                return cleaned.strip()
+
+            return text
+
+        cleaned = clean_text_by_label(raw_text, label)
+
+        st.subheader("🧾 Cleaned Output")
+        st.code(cleaned if cleaned else "[No valid pattern found]")
