@@ -6,6 +6,7 @@ import numpy as np
 import tempfile
 import os
 import re
+import requests
 from PIL import Image
 
 # ==========================================
@@ -15,23 +16,92 @@ st.set_page_config(page_title="Stego Detection", layout="wide")
 st.title("🔍 Steganography + Malicious Payload Detector")
 
 # ==========================================
+# LABEL MAP
+# ==========================================
+label_map = {"js": 0, "html": 1, "ps": 2, "eth": 3, "url": 4}
+reverse_label_map = {v: k for k, v in label_map.items()}
+
+# ==========================================
+# HF SETUP
+# ==========================================
+HF_TOKEN = st.secrets["HF_TOKEN"]
+
+API_URL = "https://api-inference.huggingface.co/models/Arch11yad/Language_classifier"
+
+headers = {
+    "Authorization": f"Bearer {HF_TOKEN}"
+}
+
+# ==========================================
 # IMAGE LOADER
 # ==========================================
 def load_image(path):
     img = Image.open(path).convert("RGB")
     img_np = np.array(img)
-
     gray = np.dot(img_np[..., :3], [0.299, 0.587, 0.114]).astype(np.uint8)
     return img_np, gray
+
+# ==========================================
+# HF PREDICTION
+# ==========================================
+def predict_type_hf(text):
+    try:
+        response = requests.post(
+            API_URL,
+            headers=headers,
+            json={"inputs": text[:1000]}
+        )
+        result = response.json()
+
+        if isinstance(result, list):
+            label_str = result[0]["label"].lower()
+
+            if "js" in label_str:
+                return "js"
+            elif "html" in label_str:
+                return "html"
+            elif "url" in label_str:
+                return "url"
+            elif "eth" in label_str:
+                return "eth"
+            elif "ps" in label_str or "powershell" in label_str:
+                return "ps"
+
+        return "js"
+
+    except:
+        return "js"
+
+# ==========================================
+# CLEAN FUNCTION
+# ==========================================
+def clean_text(text, label):
+
+    if label == "js":
+        return "".join(c for c in text if c.isprintable())
+
+    elif label == "html":
+        match = re.search(r"(<.*(?:</html>|</script>))", text, re.DOTALL)
+        return match.group(1) if match else text
+
+    elif label == "url":
+        match = re.search(r"https?://[^\s'\"<>]+", text)
+        return match.group(0) if match else text
+
+    elif label == "eth":
+        match = re.search(r"0x[a-fA-F0-9]{40}", text)
+        return match.group(0) if match else text
+
+    elif label == "ps":
+        return "".join(c for c in text if c.isprintable())
+
+    return text
 
 # ==========================================
 # DATA EXTRACTOR
 # ==========================================
 class CodeBERTDataExtractor:
     def __init__(self, path):
-        self.path = path
-        self.filename = os.path.basename(path).lower()
-
         img = Image.open(path).convert("RGB")
         self.image = np.array(img)
         self.flat_pixels = self.image.flatten()
@@ -57,22 +127,14 @@ class CodeBERTDataExtractor:
     def process_for_classifier(self):
         text = self.get_raw_text()
 
-        if "_url_" in self.filename:
-            match = re.search(r"https?://[^\s'\"<>]+", text)
-            return match.group(0) if match else ""
+        if not text.strip():
+            return "", "unknown", -1
 
-        elif "_html_" in self.filename:
-            match = re.search(r"(<.*(?:</html>|</script>))\s*$", text, re.DOTALL)
-            return match.group(1) if match else ""
+        label = predict_type_hf(text)
+        cleaned = clean_text(text, label)
+        label_id = label_map.get(label, -1)
 
-        elif "_js_" in self.filename:
-            return "".join(c for c in text if c.isprintable())
-
-        elif "_eth_" in self.filename:
-            match = re.search(r"0x[a-fA-F0-9]{40}", text)
-            return match.group(0) if match else ""
-
-        return text
+        return cleaned, label, label_id
 
 # ==========================================
 # SRNet MODEL
@@ -160,12 +222,16 @@ if uploaded:
     st.metric("Probability", f"{prob*100:.2f}%")
 
     col1, col2, col3 = st.columns(3)
-    col1.image(img, caption="Original Image")
+    col1.image(img, caption="Original")
     col2.image(heatmap, caption="SRNet Noise Map")
     col3.image(lsb, caption="Hidden Bit Plane (LSB)")
 
-    st.subheader("🧠 Extracted Hidden Data")
+    # ===== TEXT EXTRACTION + CLASSIFICATION =====
     extractor = CodeBERTDataExtractor(path)
-    text = extractor.process_for_classifier()
+    cleaned_text, label, label_id = extractor.process_for_classifier()
 
-    st.code(text if text else "[No Valid Pattern Found]")
+    st.subheader("🧠 Detected Type")
+    st.write(f"{label.upper()} (Class ID: {label_id})")
+
+    st.subheader("🧾 Cleaned Extracted Code")
+    st.code(cleaned_text if cleaned_text else "[No Valid Pattern Found]")
