@@ -53,7 +53,7 @@ class CodeBERTDataExtractor:
         else:
             start_bit, end_bit = 0, limit * 8
 
-        bits = "".join([str(p & 1) for p in self.flat_pixels[start_bit:end_bit])
+        bits = "".join([str(p & 1) for p in self.flat_pixels[start_bit:end_bit]])
         byte_arr = [int(bits[i:i+8], 2) for i in range(0, len(bits), 8)]
 
         return bytes(byte_arr).decode('utf-8', errors='ignore')
