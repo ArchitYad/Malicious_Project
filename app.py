@@ -239,6 +239,7 @@ with tab2:
         st.subheader("Detected Type")
         st.write(label.upper())
 
+        # ================= CLEANING =================
         def clean_text_by_label(text, label):
 
             if label == "url":
@@ -268,3 +269,85 @@ with tab2:
 
         st.subheader("🧾 Cleaned Output")
         st.code(cleaned if cleaned else "[No valid pattern found]")
+
+        # ================= MALICIOUS DETECTION =================
+        st.subheader("🚨 Malicious Analysis")
+
+        if not cleaned or len(cleaned) < 5:
+            st.warning("Text too small for analysis")
+        else:
+            try:
+                # -------- LOAD MODEL BASED ON LABEL --------
+                if label in ["url", "js", "html", "ps"]:
+
+                    from transformers import pipeline
+
+                    model_map = {
+                        "url": "Arch11yad/url_malicious_detect",
+                        "js": "Arch11yad/js_malicious_detect",
+                        "html": "Arch11yad/HTML_Malicious_detect_y",
+                        "ps": "Arch11yad/powershell_final",
+                    }
+
+                    from transformers import pipeline
+
+                    hf_token = st.secrets["HF_TOKEN"]
+                    
+                    classifier = pipeline(
+                        "text-classification",
+                        model=model_map[label],
+                        token=hf_token
+                    )
+
+                    result = classifier(cleaned[:512])[0]
+
+                    st.success(f"Prediction: {result['label']}")
+                    st.write("Confidence:", round(result["score"], 3))
+
+                elif label == "eth":
+
+                    # -------- ETH FTTransformer --------
+                    class FTTransformer(nn.Module):
+                        def __init__(self, input_dim=1, d_model=64, n_heads=4, n_layers=2):
+                            super().__init__()
+                            self.embedding = nn.Linear(input_dim, d_model)
+
+                            encoder_layer = nn.TransformerEncoderLayer(
+                                d_model=d_model, nhead=n_heads, batch_first=True
+                            )
+
+                            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+
+                            self.fc = nn.Sequential(
+                                nn.Linear(d_model, 64),
+                                nn.ReLU(),
+                                nn.Linear(64, 2)
+                            )
+
+                        def forward(self, x):
+                            x = self.embedding(x)
+                            x = x.unsqueeze(1)
+                            x = self.transformer(x)
+                            x = x.mean(dim=1)
+                            return self.fc(x)
+
+                    eth_model = FTTransformer()
+                    eth_model.load_state_dict(torch.load("model/ethaddress_model.pth", map_location="cpu"))
+                    eth_model.eval()
+
+                    x = torch.tensor([[len(cleaned)]], dtype=torch.float32)
+
+                    with torch.no_grad():
+                        logits = eth_model(x)
+                        probs = torch.softmax(logits, dim=1)[0]
+
+                    pred = "Malicious" if probs[1] > 0.5 else "Safe"
+
+                    st.success(f"Prediction: {pred}")
+                    st.write("Confidence:", float(probs[1]))
+
+                else:
+                    st.info("No model available for this type")
+
+            except Exception as e:
+                st.error(f"Detection failed: {str(e)}")
