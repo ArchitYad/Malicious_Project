@@ -75,22 +75,43 @@ def extract_features(text):
     length = len(text)
 
     return [
+        # BASIC
         length,
         entropy(text),
+
+        # RATIOS
         sum(c.isalpha() for c in text)/length,
         sum(c.isdigit() for c in text)/length,
+        sum(c.isspace() for c in text)/length,
+
+        # SYMBOLS
         text.count(";")/length,
         text.count("{")/length,
         text.count("}")/length,
         text.count("<")/length,
         text.count(">")/length,
         text.count("=")/length,
+        text.count("(")/length,
+        text.count(")")/length,
+
+        # PATTERNS
         int("http" in text),
+        int("https" in text),
         int("0x" in text),
         int("<html" in text.lower()),
         int("function" in text),
+        int("var" in text),
+        int("let" in text),
+        int("const" in text),
         int("powershell" in text.lower()),
+        int("invoke" in text.lower()),
+
+        # NOISE
+        text.count("?")/length,
+        text.count("@")/length,
     ]
+
+
 
 # ==========================================
 # PREDICT CLASS
