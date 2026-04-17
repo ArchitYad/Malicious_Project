@@ -8,3 +8,5 @@ xgboost
 joblib
 transformers
 huggingface_hub
+lime
+groq
