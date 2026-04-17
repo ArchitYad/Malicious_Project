@@ -1,10 +1,9 @@
 import streamlit as st
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 import tempfile
-import os
 import re
 import joblib
 from PIL import Image
@@ -13,6 +12,7 @@ from PIL import Image
 # CONFIG
 # ==========================================
 st.set_page_config(page_title="Stego Detector", layout="wide")
+st.title("🔍 Stego Detection + Raw Payload Classification")
 
 # ==========================================
 # LABEL MAP
@@ -21,14 +21,13 @@ label_map = {"js": 0, "html": 1, "ps": 2, "eth": 3, "url": 4}
 reverse_label_map = {v: k for k, v in label_map.items()}
 
 # ==========================================
-# LOAD CLASSIFIER
+# LOAD MODEL
 # ==========================================
 @st.cache_resource
-def load_classifier():
-    model = joblib.load("model/final_fast_model.pkl")
-    return model
+def load_model():
+    return joblib.load("model/final_fast_model.pkl")
 
-clf = load_classifier()
+clf = load_model()
 
 # ==========================================
 # IMAGE LOADER
@@ -40,7 +39,7 @@ def load_image(path):
     return img_np, gray
 
 # ==========================================
-# RAW TEXT EXTRACTOR
+# RAW LSB EXTRACTOR (EXACT SAME AS TRAINING)
 # ==========================================
 class RawExtractor:
     def __init__(self, path):
@@ -54,13 +53,13 @@ class RawExtractor:
         return bytes(byte_arr).decode('utf-8', errors='ignore')
 
 # ==========================================
-# CLEAN TEXT
+# CLEAN TEXT (ONLY BASIC)
 # ==========================================
 def clean_text(text):
     return re.sub(r"[^\x20-\x7E\n\r\t]", "", text)
 
 # ==========================================
-# FEATURE EXTRACTION
+# ENTROPY
 # ==========================================
 def entropy(text):
     if len(text) == 0:
@@ -68,6 +67,9 @@ def entropy(text):
     probs = [text.count(c)/len(text) for c in set(text)]
     return -sum(p*np.log2(p) for p in probs if p > 0)
 
+# ==========================================
+# FEATURE EXTRACTION (MUST MATCH TRAINING)
+# ==========================================
 def extract_features(text):
     if len(text) == 0:
         return [0]*25
@@ -75,16 +77,13 @@ def extract_features(text):
     length = len(text)
 
     return [
-        # BASIC
         length,
         entropy(text),
 
-        # RATIOS
         sum(c.isalpha() for c in text)/length,
         sum(c.isdigit() for c in text)/length,
         sum(c.isspace() for c in text)/length,
 
-        # SYMBOLS
         text.count(";")/length,
         text.count("{")/length,
         text.count("}")/length,
@@ -94,7 +93,6 @@ def extract_features(text):
         text.count("(")/length,
         text.count(")")/length,
 
-        # PATTERNS
         int("http" in text),
         int("https" in text),
         int("0x" in text),
@@ -106,25 +104,24 @@ def extract_features(text):
         int("powershell" in text.lower()),
         int("invoke" in text.lower()),
 
-        # NOISE
         text.count("?")/length,
         text.count("@")/length,
     ]
 
-
-
 # ==========================================
-# PREDICT CLASS
+# CLASSIFICATION
 # ==========================================
 def predict_class(text):
     text = clean_text(text)
     feat = np.array([extract_features(text)])
+
     probs = clf.predict_proba(feat)[0]
     pred = np.argmax(probs)
+
     return reverse_label_map[pred], probs
 
 # ==========================================
-# SRNet MODEL
+# SRNet MODEL (FOR VISUALIZATION)
 # ==========================================
 class SRNet(nn.Module):
     def __init__(self):
@@ -184,62 +181,38 @@ def analyze(path):
     return img, heatmap, lsb, prob
 
 # ==========================================
-# UI TABS
+# UI
 # ==========================================
-tab1, tab2 = st.tabs(["🔍 Image Analysis", "🧾 Clean Output"])
+uploaded = st.file_uploader("Upload Image", type=["png","jpg","jpeg"])
 
-# ==========================================
-# TAB 1
-# ==========================================
-with tab1:
-    uploaded = st.file_uploader("Upload Image", type=["png","jpg","jpeg"])
+if uploaded:
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp.write(uploaded.read())
+        path = tmp.name
 
-    if uploaded:
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            tmp.write(uploaded.read())
-            path = tmp.name
+    st.image(uploaded, caption="Uploaded Image")
 
-        st.image(uploaded)
+    img, heatmap, lsb, prob = analyze(path)
 
-        img, heatmap, lsb, prob = analyze(path)
+    st.metric("Stego Probability", f"{prob*100:.2f}%")
 
-        st.metric("Stego Probability", f"{prob*100:.2f}%")
+    col1, col2, col3 = st.columns(3)
+    col1.image(img, caption="Original")
+    col2.image(heatmap, caption="SRNet Noise Map")
+    col3.image(lsb, caption="LSB Bit Plane")
 
-        col1, col2, col3 = st.columns(3)
-        col1.image(img, caption="Original")
-        col2.image(heatmap, caption="Noise Map")
-        col3.image(lsb, caption="LSB Plane")
+    # ===== RAW TEXT =====
+    extractor = RawExtractor(path)
+    raw_text = extractor.extract()
 
-        extractor = RawExtractor(path)
-        raw_text = extractor.extract()
+    st.subheader("📄 Raw Extracted Text")
+    st.code(raw_text[:1000] if raw_text else "[No Data Found]")
 
-        st.session_state["raw_text"] = raw_text
+    # ===== CLASSIFICATION =====
+    label, probs = predict_class(raw_text)
 
-        label, probs = predict_class(raw_text)
-        st.session_state["label"] = label
+    st.subheader("🧠 Detected Class")
+    st.write(label.upper())
 
-        st.subheader("📄 Raw Extracted Text")
-        st.code(raw_text[:1000])
-
-        st.subheader("🧠 Detected Class")
-        st.write(label.upper())
-
-# ==========================================
-# TAB 2
-# ==========================================
-with tab2:
-    if "raw_text" in st.session_state:
-
-        raw_text = st.session_state["raw_text"]
-        label = st.session_state["label"]
-
-        st.subheader("Detected Type")
-        st.write(label.upper())
-
-        cleaned = clean_text(raw_text)
-
-        st.subheader("Cleaned Output")
-        st.code(cleaned)
-
-    else:
-        st.info("Upload image first in Tab 1")
+    st.subheader("📊 Probabilities")
+    st.write(probs)
