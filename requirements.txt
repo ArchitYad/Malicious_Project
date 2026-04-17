@@ -6,3 +6,5 @@ pillow
 scikit-learn
 xgboost
 joblib
+transformers
+huggingface_hub
