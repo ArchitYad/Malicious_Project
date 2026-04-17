@@ -31,6 +31,43 @@ def load_model():
 clf = load_model()
 
 # ==========================================
+# SRNet MODEL
+# ==========================================
+class SRNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layer1 = nn.Sequential(nn.Conv2d(1,64,3,1,1), nn.BatchNorm2d(64), nn.ReLU())
+        self.layer2 = nn.Sequential(nn.Conv2d(64,64,3,1,1), nn.BatchNorm2d(64), nn.ReLU())
+        self.layer3 = nn.Sequential(nn.Conv2d(64,64,3,1,1), nn.BatchNorm2d(64))
+        self.layer4 = nn.Sequential(nn.Conv2d(64,128,3,1,1), nn.BatchNorm2d(128))
+        self.layer5 = nn.Sequential(nn.Conv2d(128,128,3,1,1), nn.BatchNorm2d(128))
+        self.layer6 = nn.Sequential(nn.Conv2d(128,256,3,1,1), nn.BatchNorm2d(256))
+        self.layer7 = nn.Sequential(nn.Conv2d(256,256,3,1,1), nn.BatchNorm2d(256))
+        self.pool = nn.AdaptiveAvgPool2d((1,1))
+        self.fc = nn.Linear(256,2)
+
+    def forward(self,x):
+        x = self.layer1(x)
+        noise = self.layer2(x)
+        x = F.relu(self.layer3(noise))
+        x = F.relu(self.layer4(x))
+        x = F.relu(self.layer5(x))
+        x = F.relu(self.layer6(x))
+        x = F.relu(self.layer7(x))
+        x = self.pool(x)
+        return self.fc(x.view(x.size(0),-1)), noise
+
+@st.cache_resource
+def load_srnet():
+    model = SRNet()
+    checkpoint = torch.load("model/srnet_epoch3_best.pth", map_location="cpu")
+    model.load_state_dict(checkpoint.get("model_state_dict", checkpoint), strict=False)
+    model.eval()
+    return model
+
+srnet = load_srnet()
+
+# ==========================================
 # IMAGE LOADER
 # ==========================================
 def load_image(path):
@@ -40,11 +77,11 @@ def load_image(path):
     return img_np, gray
 
 # ==========================================
-# RAW LSB EXTRACTOR (EXACT SAME AS TRAINING)
+# RAW LSB EXTRACTOR (MATCH TRAINING)
 # ==========================================
 class RawExtractor:
     def __init__(self, path):
-        img = cv2.imread(path)   # ✅ SAME AS TRAINING
+        img = cv2.imread(path)
         if img is None:
             raise Exception("Image not found")
         self.flat_pixels = img.flatten()
@@ -55,7 +92,7 @@ class RawExtractor:
         return bytes(byte_arr).decode('utf-8', errors='ignore')
 
 # ==========================================
-# CLEAN TEXT (ONLY BASIC)
+# CLEAN TEXT (BASIC)
 # ==========================================
 def clean_text(text):
     return re.sub(r"[^\x20-\x7E\n\r\t]", "", text)
@@ -70,7 +107,7 @@ def entropy(text):
     return -sum(p*np.log2(p) for p in probs if p > 0)
 
 # ==========================================
-# FEATURE EXTRACTION (MUST MATCH TRAINING)
+# FEATURE EXTRACTION (MATCH TRAINING)
 # ==========================================
 def extract_features(text):
     if len(text) == 0:
@@ -116,51 +153,9 @@ def extract_features(text):
 def predict_class(text):
     text = clean_text(text)
     feat = np.array([extract_features(text)])
-
     probs = clf.predict_proba(feat)[0]
     pred = np.argmax(probs)
-
     return reverse_label_map[pred], probs
-
-# ==========================================
-# SRNet MODEL (FOR VISUALIZATION)
-# ==========================================
-class SRNet(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.layer1 = nn.Sequential(nn.Conv2d(1,64,3,1,1), nn.BatchNorm2d(64), nn.ReLU())
-        self.layer2 = nn.Sequential(nn.Conv2d(64,64,3,1,1), nn.BatchNorm2d(64), nn.ReLU())
-        self.layer3 = nn.Sequential(nn.Conv2d(64,64,3,1,1), nn.BatchNorm2d(64))
-        self.layer4 = nn.Sequential(nn.Conv2d(64,128,3,1,1), nn.BatchNorm2d(128))
-        self.layer5 = nn.Sequential(nn.Conv2d(128,128,3,1,1), nn.BatchNorm2d(128))
-        self.layer6 = nn.Sequential(nn.Conv2d(128,256,3,1,1), nn.BatchNorm2d(256))
-        self.layer7 = nn.Sequential(nn.Conv2d(256,256,3,1,1), nn.BatchNorm2d(256))
-        self.pool = nn.AdaptiveAvgPool2d((1,1))
-        self.fc = nn.Linear(256,2)
-
-    def forward(self,x):
-        x = self.layer1(x)
-        noise = self.layer2(x)
-        x = F.relu(self.layer3(noise))
-        x = F.relu(self.layer4(x))
-        x = F.relu(self.layer5(x))
-        x = F.relu(self.layer6(x))
-        x = F.relu(self.layer7(x))
-        x = self.pool(x)
-        return self.fc(x.view(x.size(0),-1)), noise
-
-# ==========================================
-# LOAD SRNET
-# ==========================================
-@st.cache_resource
-def load_srnet():
-    model = SRNet()
-    checkpoint = torch.load("model/srnet_epoch3_best.pth", map_location="cpu")
-    model.load_state_dict(checkpoint.get("model_state_dict", checkpoint), strict=False)
-    model.eval()
-    return model
-
-srnet = load_srnet()
 
 # ==========================================
 # ANALYSIS
@@ -183,46 +178,60 @@ def analyze(path):
     return img, heatmap, lsb, prob
 
 # ==========================================
-# UI
+# TABS
 # ==========================================
-uploaded = st.file_uploader("Upload Image", type=["png","jpg","jpeg"])
+tab1, tab2 = st.tabs(["🔍 Image Analysis", "🧾 Clean Output"])
 
-if uploaded:
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        tmp.write(uploaded.read())
-        path = tmp.name
+# ==========================================
+# TAB 1
+# ==========================================
+with tab1:
 
-    st.image(uploaded, caption="Uploaded Image")
+    uploaded = st.file_uploader("Upload Image", type=["png","jpg","jpeg"])
 
-    img, heatmap, lsb, prob = analyze(path)
+    if uploaded:
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(uploaded.read())
+            path = tmp.name
 
-    st.metric("Stego Probability", f"{prob*100:.2f}%")
+        st.image(uploaded)
 
-    col1, col2, col3 = st.columns(3)
-    col1.image(img, caption="Original")
-    col2.image(heatmap, caption="SRNet Noise Map")
-    col3.image(lsb, caption="LSB Bit Plane")
+        img, heatmap, lsb, prob = analyze(path)
 
-    # ===== RAW TEXT =====
-    extractor = RawExtractor(path)
-    raw_text = extractor.extract()
+        st.metric("Stego Probability", f"{prob*100:.2f}%")
 
-    st.subheader("📄 Raw Extracted Text")
-    st.code(raw_text[:1000] if raw_text else "[No Data Found]")
+        col1, col2, col3 = st.columns(3)
+        col1.image(img, caption="Original")
+        col2.image(heatmap, caption="SRNet Noise Map")
+        col3.image(lsb, caption="LSB Bit Plane")
 
-    # ===== CLASSIFICATION =====
-    label, probs = predict_class(raw_text)
+        # RAW TEXT
+        extractor = RawExtractor(path)
+        raw_text = extractor.extract()
 
-    st.subheader("🧠 Detected Class")
-    st.write(label.upper())
+        st.session_state["raw_text"] = raw_text
 
-    st.subheader("📊 Probabilities")
-    st.write(probs)
+        st.subheader("📄 Raw Extracted Text")
+        st.code(raw_text[:1000] if raw_text else "[No Data Found]")
 
+        # CLASSIFICATION
+        label, probs = predict_class(raw_text)
+
+        st.session_state["label"] = label
+
+        st.subheader("🧠 Detected Class")
+        st.write(label.upper())
+
+        st.subheader("📊 Probabilities")
+        st.write(probs)
+
+# ==========================================
+# TAB 2
+# ==========================================
 with tab2:
 
-    if "raw_text" not in st.session_state:
-        st.warning("Upload image first in Tab 1")
+    if "raw_text" not in st.session_state or "label" not in st.session_state:
+        st.warning("⚠️ Please upload image in Tab 1 first.")
     else:
         raw_text = st.session_state["raw_text"]
         label = st.session_state["label"]
@@ -230,7 +239,6 @@ with tab2:
         st.subheader("Detected Type")
         st.write(label.upper())
 
-        # ===== CLEAN BASED ON LABEL =====
         def clean_text_by_label(text, label):
 
             if label == "url":
