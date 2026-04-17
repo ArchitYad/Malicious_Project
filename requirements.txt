@@ -1,6 +1,8 @@
 streamlit
 torch
-torchvision
 numpy
-Pillow
-requests
+opencv-python-headless
+pillow
+scikit-learn
+xgboost
+joblib
