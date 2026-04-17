@@ -147,7 +147,7 @@ def analyze_image(img_path, model, device):
 st.set_page_config(page_title="Stego Detection App", layout="wide")
 st.title("🔍 Steganography + Malicious Payload Detector")
 
-model_path = "model/srnet.pth"  # or downloaded from GitHub
+model_path = "model/srnet_epoch3_best.pth"  # or downloaded from GitHub
 
 model, device = load_model(model_path)
 
