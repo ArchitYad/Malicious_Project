@@ -304,23 +304,47 @@ with tab2:
                         token=hf_token
                     )
 
-                    result = classifier(cleaned[:512], top_k=None)[0]
+                    result = classifier(cleaned[:512], top_k=None)
 
-                    # -------- Normalize output --------
+                    # Normalize output format
+                    if isinstance(result, list) and isinstance(result[0], dict):
+                        output = result[0] if "label" in result[0] else result
+                    else:
+                        output = result
+                    
                     score_map = {"safe": 0.5, "malicious": 0.5}
-
-                    for item in result:
-                        lbl = item["label"].lower()
-                        score = float(item["score"])
-
+                    
+                    # Case: list of dicts
+                    if isinstance(output, list):
+                        for item in output:
+                            lbl = str(item.get("label", "")).lower()
+                            score = float(item.get("score", 0.5))
+                    
+                            if "safe" in lbl or lbl.endswith("0"):
+                                score_map["safe"] = score
+                            elif "mal" in lbl or lbl.endswith("1"):
+                                score_map["malicious"] = score
+                    
+                    # Case: single dict
+                    elif isinstance(output, dict):
+                        lbl = str(output.get("label", "")).lower()
+                        score = float(output.get("score", 0.5))
+                    
                         if "safe" in lbl or lbl.endswith("0"):
                             score_map["safe"] = score
                         elif "mal" in lbl or lbl.endswith("1"):
                             score_map["malicious"] = score
-
+                    
+                    # Case: string fallback
+                    elif isinstance(output, str):
+                        if "mal" in output.lower():
+                            score_map["malicious"] = 1.0
+                        else:
+                            score_map["safe"] = 1.0
+                    
                     safe_score = score_map["safe"]
                     mal_score = score_map["malicious"]
-
+                    
                     final_label = "malicious" if mal_score > safe_score else "safe"
                     confidence = max(safe_score, mal_score)
 
