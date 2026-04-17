@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import tempfile
 import re
 import joblib
+import cv2
 from PIL import Image
 
 # ==========================================
@@ -43,9 +44,10 @@ def load_image(path):
 # ==========================================
 class RawExtractor:
     def __init__(self, path):
-        img = Image.open(path).convert("RGB")
-        self.image = np.array(img)
-        self.flat_pixels = self.image.flatten()
+        img = cv2.imread(path)   # ✅ SAME AS TRAINING
+        if img is None:
+            raise Exception("Image not found")
+        self.flat_pixels = img.flatten()
 
     def extract(self, limit=5000):
         bits = "".join([str(p & 1) for p in self.flat_pixels[:limit * 8]])
