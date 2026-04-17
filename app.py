@@ -7,7 +7,13 @@ import numpy as np
 import tempfile
 import os
 import re
-from PIL import Image
+
+# ==========================================
+# PAGE CONFIG (FIRST LINE)
+# ==========================================
+st.set_page_config(page_title="Stego Detection App", layout="wide")
+
+st.title("🔍 Steganography + Malicious Payload Detector")
 
 # ==========================================
 # 1. SRNet Model
@@ -51,67 +57,59 @@ class SRNet(nn.Module):
 
 
 # ==========================================
-# 2. Data Extractor (same as your file)
-# ==========================================
-class CodeBERTDataExtractor:
-    def __init__(self, path):
-        self.path = path
-        self.filename = os.path.basename(path).lower()
-        self.image = cv2.imread(path)
-        self.flat_pixels = self.image.flatten()
-
-    def get_raw_text(self, limit=5000):
-        header_bits = "".join([str(p & 1) for p in self.flat_pixels[:64]])
-        try:
-            data_len = int(header_bits, 2)
-        except:
-            data_len = 0
-
-        if 0 < data_len < (len(self.flat_pixels) // 8):
-            start_bit, end_bit = 64, 64 + (data_len * 8)
-        else:
-            start_bit, end_bit = 0, limit * 8
-
-        bits = "".join([str(p & 1) for p in self.flat_pixels[start_bit:end_bit]])
-        byte_arr = [int(bits[i:i+8], 2) for i in range(0, len(bits), 8)]
-        return bytes(byte_arr).decode('utf-8', errors='ignore')
-
-    def process_for_classifier(self):
-        text = self.get_raw_text()
-
-        if "_js_" in self.filename:
-            return "".join(c for c in text if c.isprintable())
-        elif "_url_" in self.filename:
-            match = re.search(r"https?://[^\s]+", text)
-            return match.group(0) if match else ""
-        elif "_eth_" in self.filename:
-            match = re.search(r"0x[a-fA-F0-9]{40}", text)
-            return match.group(0) if match else ""
-
-        return text
-
-
-# ==========================================
-# 3. Load Model
+# 2. SAFE MODEL LOADER (FIXED)
 # ==========================================
 @st.cache_resource
 def load_model(model_path):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"   # 🔥 FORCE CPU (prevents freezing)
+
     model = SRNet().to(device)
 
-    checkpoint = torch.load(model_path, map_location=device)
-    sd = checkpoint.get("model_state_dict", checkpoint)
-    model.load_state_dict(sd, strict=False)
-    model.eval()
+    if not os.path.exists(model_path):
+        st.error(f"❌ Model not found at {model_path}")
+        return None, device
+
+    try:
+        checkpoint = torch.load(model_path, map_location=device)
+        sd = checkpoint.get("model_state_dict", checkpoint)
+        model.load_state_dict(sd, strict=False)
+        model.eval()
+    except Exception as e:
+        st.error(f"❌ Model loading failed: {e}")
+        return None, device
 
     return model, device
 
 
 # ==========================================
-# 4. Analysis Function
+# 3. EXTRACTOR (SAFE)
+# ==========================================
+class CodeBERTDataExtractor:
+    def __init__(self, path):
+        self.image = cv2.imread(path)
+        if self.image is None:
+            raise Exception("Image load failed")
+        self.flat_pixels = self.image.flatten()
+
+    def get_raw_text(self, limit=5000):
+        bits = "".join([str(p & 1) for p in self.flat_pixels[:limit * 8]])
+        byte_arr = [int(bits[i:i+8], 2) for i in range(0, len(bits), 8)]
+        return bytes(byte_arr).decode('utf-8', errors='ignore')
+
+    def process_for_classifier(self):
+        return self.get_raw_text()
+
+
+# ==========================================
+# 4. ANALYSIS FUNCTION (SAFE)
 # ==========================================
 def analyze_image(img_path, model, device):
     img = cv2.imread(img_path)
+
+    if img is None:
+        st.error("❌ Image failed to load")
+        st.stop()
+
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     t = torch.from_numpy(gray).unsqueeze(0).unsqueeze(0).float().to(device)
@@ -121,67 +119,62 @@ def analyze_image(img_path, model, device):
         logits, noise_feat = model(t)
         prob = torch.softmax(logits, 1)[0, 1].item()
 
-    # Noise map
     heatmap = torch.mean(torch.abs(noise_feat), 1).squeeze().cpu().numpy()
     heatmap = cv2.applyColorMap(
         cv2.normalize(heatmap, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8),
         cv2.COLORMAP_JET
     )
 
-    # LSB
     lsb = (gray & 1) * 255
-
-    # Magnified bits
     patch = gray[0:10, 0:10] & 1
-
-    # Difference image
-    reconstructed = gray & ~1
-    diff = cv2.absdiff(gray, reconstructed)
+    diff = cv2.absdiff(gray, gray & ~1)
 
     return img, heatmap, lsb, patch, diff, prob
 
 
 # ==========================================
-# 5. Streamlit UI
+# 5. UI LOGIC (FIXED FLOW)
 # ==========================================
-st.set_page_config(page_title="Stego Detection App", layout="wide")
-st.title("🔍 Steganography + Malicious Payload Detector")
-
-model_path = "model/srnet_epoch3_best.pth"  # or downloaded from GitHub
-
-model, device = load_model(model_path)
+model_path = "model/srnet_epoch3_best.pth"
 
 uploaded_file = st.file_uploader("Upload an Image", type=["png", "jpg", "jpeg"])
 
 if uploaded_file:
+    st.write("✅ Image uploaded")
+
+    # Save temp file
     with tempfile.NamedTemporaryFile(delete=False) as tmp:
         tmp.write(uploaded_file.read())
         img_path = tmp.name
 
-    st.image(uploaded_file, caption="Uploaded Image", use_column_width=True)
+    st.image(uploaded_file, caption="Uploaded Image")
 
-    img, heatmap, lsb, patch, diff, prob = analyze_image(img_path, model, device)
+    # Load model ONLY AFTER upload
+    with st.spinner("🔄 Loading model..."):
+        model, device = load_model(model_path)
 
+    if model is None:
+        st.stop()
+
+    # Run analysis
+    with st.spinner("🔍 Analyzing image..."):
+        img, heatmap, lsb, patch, diff, prob = analyze_image(img_path, model, device)
+
+    # Results
     st.subheader("📊 Detection Result")
     st.metric("Stego Probability", f"{prob*100:.2f}%")
 
     col1, col2, col3 = st.columns(3)
 
-    with col1:
-        st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption="Original")
-
-    with col2:
-        st.image(heatmap, caption="SRNet Noise Map")
-
-    with col3:
-        st.image(lsb, caption="LSB Bit Plane")
+    col1.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption="Original")
+    col2.image(heatmap, caption="SRNet Noise Map")
+    col3.image(lsb, caption="LSB Bit Plane")
 
     st.subheader("🔬 Bit Analysis")
-
-    st.image(patch * 255, caption="Magnified Bits (0/1)")
+    st.image(patch * 255, caption="Magnified Bits")
 
     st.subheader("⚡ Difference Image")
-    st.image(diff, caption="Original vs Clean")
+    st.image(diff, caption="Difference")
 
     st.subheader("🧠 Extracted Hidden Data")
 
