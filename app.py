@@ -228,8 +228,6 @@ with tab1:
 # ==========================================
 # TAB 2
 # ==========================================
-from lime.lime_text import LimeTextExplainer
-
 with tab2:
 
     if "raw_text" not in st.session_state or "label" not in st.session_state:
@@ -272,24 +270,22 @@ with tab2:
         st.subheader("🧾 Cleaned Output")
         st.code(cleaned if cleaned else "[No valid pattern found]")
 
+        # ===== STORE =====
+        st.session_state["cleaned_text"] = cleaned
+        st.session_state["attention_tokens"] = []
+        st.session_state["attention_snippet"] = ""
+
         # ================= MALICIOUS DETECTION =================
         st.subheader("🚨 Malicious Analysis")
-
-        # INIT CACHE VARIABLES
-        st.session_state["cleaned_text"] = cleaned
-        st.session_state["malicious_label"] = "unknown"
-        st.session_state["malicious_score"] = 0.0
-        st.session_state["lime_tokens"] = []
 
         if not cleaned or len(cleaned) < 5:
             st.warning("Text too small for analysis")
         else:
             try:
+                # -------- HF MODELS --------
                 if label in ["url", "js", "html", "ps"]:
 
                     from transformers import pipeline
-
-                    hf_token = st.secrets["HF_TOKEN"]
 
                     model_map = {
                         "url": "Arch11yad/url_malicious_detect",
@@ -301,102 +297,62 @@ with tab2:
                     classifier = pipeline(
                         "text-classification",
                         model=model_map[label],
-                        token=hf_token
+                        token=st.secrets["HF_TOKEN"]
                     )
 
-                    result = classifier(cleaned[:512], top_k=None)
+                    result = classifier(cleaned[:512])[0]
 
-                    # Normalize output format
-                    if isinstance(result, list) and isinstance(result[0], dict):
-                        output = result[0] if "label" in result[0] else result
-                    else:
-                        output = result
-                    
-                    score_map = {"safe": 0.5, "malicious": 0.5}
-                    
-                    # Case: list of dicts
-                    if isinstance(output, list):
-                        for item in output:
-                            lbl = str(item.get("label", "")).lower()
-                            score = float(item.get("score", 0.5))
-                    
-                            if "safe" in lbl or lbl.endswith("0"):
-                                score_map["safe"] = score
-                            elif "mal" in lbl or lbl.endswith("1"):
-                                score_map["malicious"] = score
-                    
-                    # Case: single dict
-                    elif isinstance(output, dict):
-                        lbl = str(output.get("label", "")).lower()
-                        score = float(output.get("score", 0.5))
-                    
-                        if "safe" in lbl or lbl.endswith("0"):
-                            score_map["safe"] = score
-                        elif "mal" in lbl or lbl.endswith("1"):
-                            score_map["malicious"] = score
-                    
-                    # Case: string fallback
-                    elif isinstance(output, str):
-                        if "mal" in output.lower():
-                            score_map["malicious"] = 1.0
-                        else:
-                            score_map["safe"] = 1.0
-                    
-                    safe_score = score_map["safe"]
-                    mal_score = score_map["malicious"]
-                    
-                    final_label = "malicious" if mal_score > safe_score else "safe"
-                    confidence = max(safe_score, mal_score)
+                    pred_label = result["label"]
+                    confidence = float(result["score"])
 
-                    st.success(f"Prediction: {final_label.upper()}")
+                    st.success(f"Prediction: {pred_label}")
                     st.write("Confidence:", round(confidence, 3))
 
-                    # SAVE
-                    st.session_state["malicious_label"] = final_label
+                    # ===== ATTENTION EXTRACTION =====
+                    st.subheader("🔦 Important Tokens (Attention)")
+
+                    def get_attention_tokens(text, top_k=15):
+                        inputs = tokenizer(
+                            text,
+                            return_tensors="pt",
+                            truncation=True,
+                            max_length=512
+                        ).to(attn_model.device)
+
+                        with torch.no_grad():
+                            outputs = attn_model(**inputs)
+
+                        # last layer attention
+                        attn = outputs.attentions[-1][0].mean(dim=0)
+                        cls_weights = attn[0]
+
+                        tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
+                        top_idx = torch.argsort(cls_weights, descending=True)[:top_k]
+
+                        important_tokens = [tokens[i] for i in top_idx]
+                        return important_tokens, tokens, top_idx
+
+                    def build_snippet(tokens, indices):
+                        selected = sorted(indices.tolist())
+                        return tokenizer.convert_tokens_to_string([tokens[i] for i in selected])
+
+                    tokens_imp, all_tokens, idxs = get_attention_tokens(cleaned)
+
+                    snippet = build_snippet(all_tokens, idxs)
+
+                    # DISPLAY
+                    st.write("Tokens:", tokens_imp)
+                    st.code(snippet)
+
+                    # STORE
+                    st.session_state["attention_tokens"] = tokens_imp
+                    st.session_state["attention_snippet"] = snippet
+                    st.session_state["malicious_label"] = pred_label
                     st.session_state["malicious_score"] = confidence
 
-                    # ================= LIME =================
-                    st.subheader("🧠 Important Tokens (LIME)")
-
-                    explainer = LimeTextExplainer(class_names=["safe", "malicious"])
-
-                    def predict_proba(texts):
-                        probs = []
-                        for t in texts:
-                            res = classifier(t[:512], top_k=None)[0]
-
-                            temp = {"safe": 0.5, "malicious": 0.5}
-
-                            for item in res:
-                                lbl = item["label"].lower()
-                                score = float(item["score"])
-
-                                if "safe" in lbl or lbl.endswith("0"):
-                                    temp["safe"] = score
-                                elif "mal" in lbl or lbl.endswith("1"):
-                                    temp["malicious"] = score
-
-                            probs.append([temp["safe"], temp["malicious"]])
-
-                        return np.array(probs)
-
-                    exp = explainer.explain_instance(
-                        cleaned[:512],
-                        predict_proba,
-                        num_features=10
-                    )
-
-                    lime_tokens = exp.as_list()
-
-                    # SAVE TOKENS
-                    st.session_state["lime_tokens"] = lime_tokens
-
-                    for word, weight in lime_tokens:
-                        st.write(f"{word} → {round(weight, 3)}")
-
+                # -------- ETH MODEL --------
                 elif label == "eth":
 
-                    # -------- ETH MODEL --------
                     class FTTransformer(nn.Module):
                         def __init__(self, input_dim=1, d_model=64, n_heads=4, n_layers=2):
                             super().__init__()
@@ -431,16 +387,18 @@ with tab2:
                         logits = eth_model(x)
                         probs = torch.softmax(logits, dim=1)[0]
 
-                    pred = "malicious" if probs[1] > 0.5 else "safe"
-                    confidence = float(probs[1])
+                    pred = "Malicious" if probs[1] > 0.5 else "Safe"
 
-                    st.success(f"Prediction: {pred.upper()}")
-                    st.write("Confidence:", round(confidence, 3))
+                    st.success(f"Prediction: {pred}")
+                    st.write("Confidence:", float(probs[1]))
 
-                    # SAVE
+                    # NO ATTENTION FOR ETH
                     st.session_state["malicious_label"] = pred
-                    st.session_state["malicious_score"] = confidence
-                    st.session_state["lime_tokens"] = []  # EMPTY FOR ETH
+                    st.session_state["malicious_score"] = float(probs[1])
+                    st.session_state["attention_tokens"] = []
+                    st.session_state["attention_snippet"] = ""
+
+                    st.info("No attention analysis for ETH")
 
                 else:
                     st.info("No model available for this type")
