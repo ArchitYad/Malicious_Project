@@ -29,6 +29,7 @@ def load_model():
     return joblib.load("model/final_fast_model.pkl")
 
 clf = load_model()
+tokenizer, attn_model, device = load_attention_model()
 
 # ==========================================
 # SRNet MODEL
@@ -270,10 +271,12 @@ with tab2:
         st.subheader("🧾 Cleaned Output")
         st.code(cleaned if cleaned else "[No valid pattern found]")
 
-        # ===== STORE =====
+        # ===== STORE DEFAULT =====
         st.session_state["cleaned_text"] = cleaned
         st.session_state["attention_tokens"] = []
         st.session_state["attention_snippet"] = ""
+        st.session_state["malicious_label"] = "unknown"
+        st.session_state["malicious_score"] = 0.0
 
         # ================= MALICIOUS DETECTION =================
         st.subheader("🚨 Malicious Analysis")
@@ -308,7 +311,11 @@ with tab2:
                     st.success(f"Prediction: {pred_label}")
                     st.write("Confidence:", round(confidence, 3))
 
-                    # ===== ATTENTION EXTRACTION =====
+                    # ===== STORE =====
+                    st.session_state["malicious_label"] = pred_label
+                    st.session_state["malicious_score"] = confidence
+
+                    # ================= ATTENTION =================
                     st.subheader("🔦 Important Tokens (Attention)")
 
                     def get_attention_tokens(text, top_k=15):
@@ -317,12 +324,11 @@ with tab2:
                             return_tensors="pt",
                             truncation=True,
                             max_length=512
-                        ).to(attn_model.device)
+                        ).to(device)   # ✅ FIXED
 
                         with torch.no_grad():
                             outputs = attn_model(**inputs)
 
-                        # last layer attention
                         attn = outputs.attentions[-1][0].mean(dim=0)
                         cls_weights = attn[0]
 
@@ -334,10 +340,11 @@ with tab2:
 
                     def build_snippet(tokens, indices):
                         selected = sorted(indices.tolist())
-                        return tokenizer.convert_tokens_to_string([tokens[i] for i in selected])
+                        return tokenizer.convert_tokens_to_string(
+                            [tokens[i] for i in selected]
+                        )
 
                     tokens_imp, all_tokens, idxs = get_attention_tokens(cleaned)
-
                     snippet = build_snippet(all_tokens, idxs)
 
                     # DISPLAY
@@ -347,11 +354,11 @@ with tab2:
                     # STORE
                     st.session_state["attention_tokens"] = tokens_imp
                     st.session_state["attention_snippet"] = snippet
-                    st.session_state["malicious_label"] = pred_label
-                    st.session_state["malicious_score"] = confidence
 
                 # -------- ETH MODEL --------
                 elif label == "eth":
+
+                    st.info("Ethereum address detected — using ETH model")
 
                     class FTTransformer(nn.Module):
                         def __init__(self, input_dim=1, d_model=64, n_heads=4, n_layers=2):
@@ -378,7 +385,9 @@ with tab2:
                             return self.fc(x)
 
                     eth_model = FTTransformer()
-                    eth_model.load_state_dict(torch.load("model/ethaddress_model.pth", map_location="cpu"))
+                    eth_model.load_state_dict(
+                        torch.load("model/ethaddress_model.pth", map_location="cpu")
+                    )
                     eth_model.eval()
 
                     x = torch.tensor([[len(cleaned)]], dtype=torch.float32)
@@ -392,7 +401,7 @@ with tab2:
                     st.success(f"Prediction: {pred}")
                     st.write("Confidence:", float(probs[1]))
 
-                    # NO ATTENTION FOR ETH
+                    # STORE (NO ATTENTION)
                     st.session_state["malicious_label"] = pred
                     st.session_state["malicious_score"] = float(probs[1])
                     st.session_state["attention_tokens"] = []
