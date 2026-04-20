@@ -22,14 +22,16 @@ label_map = {"js": 0, "html": 1, "ps": 2, "eth": 3, "url": 4}
 reverse_label_map = {v: k for k, v in label_map.items()}
 
 # ==========================================
-# LOAD SKLEARN MODEL
+# LOAD MODEL
 # ==========================================
 @st.cache_resource
 def load_model():
     return joblib.load("model/final_fast_model.pkl")
 
+clf = load_model()
+
 # ==========================================
-# SRNET MODEL
+# SRNet MODEL
 # ==========================================
 class SRNet(nn.Module):
     def __init__(self):
@@ -44,7 +46,7 @@ class SRNet(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d((1,1))
         self.fc = nn.Linear(256,2)
 
-    def forward(self, x):
+    def forward(self,x):
         x = self.layer1(x)
         noise = self.layer2(x)
         x = F.relu(self.layer3(noise))
@@ -53,7 +55,7 @@ class SRNet(nn.Module):
         x = F.relu(self.layer6(x))
         x = F.relu(self.layer7(x))
         x = self.pool(x)
-        return self.fc(x.view(x.size(0), -1)), noise
+        return self.fc(x.view(x.size(0),-1)), noise
 
 @st.cache_resource
 def load_srnet():
@@ -63,82 +65,7 @@ def load_srnet():
     model.eval()
     return model
 
-# ==========================================
-# ETH MODEL
-# ==========================================
-class FTTransformer(nn.Module):
-    def __init__(self, input_dim=1, d_model=64, n_heads=4, n_layers=2):
-        super().__init__()
-        self.embedding = nn.Linear(input_dim, d_model)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, nhead=n_heads, batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
-        self.fc = nn.Sequential(
-            nn.Linear(d_model, 64),
-            nn.ReLU(),
-            nn.Linear(64, 2)
-        )
-
-    def forward(self, x):
-        x = self.embedding(x)
-        x = x.unsqueeze(1)
-        x = self.transformer(x)
-        x = x.mean(dim=1)
-        return self.fc(x)
-
-@st.cache_resource
-def load_eth_model():
-    model = FTTransformer()
-    model.load_state_dict(
-        torch.load("model/ethaddress_model.pth", map_location="cpu")
-    )
-    model.eval()
-    return model
-
-# ==========================================
-# ATTENTION MODEL (HuggingFace) - CACHED
-# ==========================================
-@st.cache_resource
-def load_attention_model():
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification
-    # Using a generic base — replace with your actual attention model name/path
-    model_name = "distilbert-base-uncased"
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = AutoTokenizer.from_pretrained(model_name, token=st.secrets["HF_TOKEN"])
-    attn_model = AutoModelForSequenceClassification.from_pretrained(
-        model_name,
-        output_attentions=True,
-        token=st.secrets["HF_TOKEN"]
-    ).to(device)
-    attn_model.eval()
-    return tokenizer, attn_model, device
-
-# ==========================================
-# HF PIPELINE CACHE (per label)
-# ==========================================
-@st.cache_resource
-def load_hf_pipeline(label):
-    from transformers import pipeline
-    model_map = {
-        "url": "Arch11yad/url_malicious_detect",
-        "js":  "Arch11yad/js_malicious_detect",
-        "html":"Arch11yad/HTML_Malicious_detect_y",
-        "ps":  "Arch11yad/powershell_final",
-    }
-    return pipeline(
-        "text-classification",
-        model=model_map[label],
-        token=st.secrets["HF_TOKEN"]
-    )
-
-# ==========================================
-# LOAD ALL MODELS AT STARTUP
-# ==========================================
-clf     = load_model()
-srnet   = load_srnet()
-eth_model = load_eth_model()
-tokenizer, attn_model, device = load_attention_model()
+srnet = load_srnet()
 
 # ==========================================
 # IMAGE LOADER
@@ -150,7 +77,7 @@ def load_image(path):
     return img_np, gray
 
 # ==========================================
-# RAW LSB EXTRACTOR
+# RAW LSB EXTRACTOR (MATCH TRAINING)
 # ==========================================
 class RawExtractor:
     def __init__(self, path):
@@ -165,7 +92,7 @@ class RawExtractor:
         return bytes(byte_arr).decode('utf-8', errors='ignore')
 
 # ==========================================
-# CLEAN TEXT
+# CLEAN TEXT (BASIC)
 # ==========================================
 def clean_text(text):
     return re.sub(r"[^\x20-\x7E\n\r\t]", "", text)
@@ -176,30 +103,35 @@ def clean_text(text):
 def entropy(text):
     if len(text) == 0:
         return 0
-    probs = [text.count(c) / len(text) for c in set(text)]
-    return -sum(p * np.log2(p) for p in probs if p > 0)
+    probs = [text.count(c)/len(text) for c in set(text)]
+    return -sum(p*np.log2(p) for p in probs if p > 0)
 
 # ==========================================
-# FEATURE EXTRACTION
+# FEATURE EXTRACTION (MATCH TRAINING)
 # ==========================================
 def extract_features(text):
     if len(text) == 0:
-        return [0] * 25
+        return [0]*25
+
     length = len(text)
+
     return [
         length,
         entropy(text),
-        sum(c.isalpha() for c in text) / length,
-        sum(c.isdigit() for c in text) / length,
-        sum(c.isspace() for c in text) / length,
-        text.count(";") / length,
-        text.count("{") / length,
-        text.count("}") / length,
-        text.count("<") / length,
-        text.count(">") / length,
-        text.count("=") / length,
-        text.count("(") / length,
-        text.count(")") / length,
+
+        sum(c.isalpha() for c in text)/length,
+        sum(c.isdigit() for c in text)/length,
+        sum(c.isspace() for c in text)/length,
+
+        text.count(";")/length,
+        text.count("{")/length,
+        text.count("}")/length,
+        text.count("<")/length,
+        text.count(">")/length,
+        text.count("=")/length,
+        text.count("(")/length,
+        text.count(")")/length,
+
         int("http" in text),
         int("https" in text),
         int("0x" in text),
@@ -210,8 +142,9 @@ def extract_features(text):
         int("const" in text),
         int("powershell" in text.lower()),
         int("invoke" in text.lower()),
-        text.count("?") / length,
-        text.count("@") / length,
+
+        text.count("?")/length,
+        text.count("@")/length,
     ]
 
 # ==========================================
@@ -225,58 +158,24 @@ def predict_class(text):
     return reverse_label_map[pred], probs
 
 # ==========================================
-# IMAGE ANALYSIS
+# ANALYSIS
 # ==========================================
 def analyze(path):
     img, gray = load_image(path)
+
     t = torch.tensor(gray).unsqueeze(0).unsqueeze(0).float()
     t = (t - 127.5) / 127.5
+
     with torch.no_grad():
         logits, noise = srnet(t)
-        prob = torch.softmax(logits, 1)[0, 1].item()
-    heatmap = torch.mean(torch.abs(noise), 1).squeeze().numpy()
+        prob = torch.softmax(logits,1)[0,1].item()
+
+    heatmap = torch.mean(torch.abs(noise),1).squeeze().numpy()
     heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min() + 1e-8)
+
     lsb = (gray & 1) * 255
+
     return img, heatmap, lsb, prob
-
-# ==========================================
-# ATTENTION HELPERS
-# ==========================================
-def get_attention_tokens(text, top_k=15):
-    inputs = tokenizer(
-        text, return_tensors="pt", truncation=True, max_length=512
-    ).to(device)
-    with torch.no_grad():
-        outputs = attn_model(**inputs)
-    attn = outputs.attentions[-1][0].mean(dim=0)
-    cls_weights = attn[0]
-    tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
-    top_idx = torch.argsort(cls_weights, descending=True)[:top_k]
-    return [tokens[i] for i in top_idx], tokens, top_idx
-
-def build_snippet(tokens, indices):
-    selected = sorted(indices.tolist())
-    return tokenizer.convert_tokens_to_string([tokens[i] for i in selected])
-
-# ==========================================
-# LABEL-BASED CLEANER
-# ==========================================
-def clean_text_by_label(text, label):
-    if label == "url":
-        match = re.search(r"https?://[^\s'\"<>]+", text)
-        return match.group(0) if match else ""
-    elif label == "html":
-        match = re.search(r"(<.*(?:</html>|</script>))", text, re.DOTALL | re.IGNORECASE)
-        return match.group(1) if match else ""
-    elif label == "js":
-        cleaned = text.replace("?", "")
-        return "".join(c for c in cleaned if c.isprintable() or c in "\n\r\t").strip()
-    elif label == "eth":
-        match = re.search(r"0x[a-fA-F0-9]{40}", text)
-        return match.group(0) if match else ""
-    elif label == "ps":
-        return "".join(c for c in text if c.isprintable() or c in "\n\r\t").strip()
-    return text
 
 # ==========================================
 # TABS
@@ -287,10 +186,11 @@ tab1, tab2 = st.tabs(["🔍 Image Analysis", "🧾 Clean Output"])
 # TAB 1
 # ==========================================
 with tab1:
-    uploaded = st.file_uploader("Upload Image", type=["png", "jpg", "jpeg"])
+
+    uploaded = st.file_uploader("Upload Image", type=["png","jpg","jpeg"])
 
     if uploaded:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
             tmp.write(uploaded.read())
             path = tmp.name
 
@@ -298,21 +198,25 @@ with tab1:
 
         img, heatmap, lsb, prob = analyze(path)
 
-        st.metric("Stego Probability", f"{prob * 100:.2f}%")
+        st.metric("Stego Probability", f"{prob*100:.2f}%")
 
         col1, col2, col3 = st.columns(3)
         col1.image(img, caption="Original")
         col2.image(heatmap, caption="SRNet Noise Map")
         col3.image(lsb, caption="LSB Bit Plane")
 
+        # RAW TEXT
         extractor = RawExtractor(path)
         raw_text = extractor.extract()
+
         st.session_state["raw_text"] = raw_text
 
         st.subheader("📄 Raw Extracted Text")
         st.code(raw_text[:1000] if raw_text else "[No Data Found]")
 
+        # CLASSIFICATION
         label, probs = predict_class(raw_text)
+
         st.session_state["label"] = label
 
         st.subheader("🧠 Detected Class")
@@ -321,78 +225,123 @@ with tab1:
         st.subheader("📊 Probabilities")
         st.write(probs)
 
-# ==========================================
-# TAB 2
-# ==========================================
 with tab2:
+
     if "raw_text" not in st.session_state or "label" not in st.session_state:
         st.warning("⚠️ Please upload image in Tab 1 first.")
     else:
         raw_text = st.session_state["raw_text"]
-        label    = st.session_state["label"]
+        label = st.session_state["label"]
 
         st.subheader("Detected Type")
         st.write(label.upper())
+
+        # ================= CLEANING =================
+        def clean_text_by_label(text, label):
+
+            if label == "url":
+                match = re.search(r"https?://[^\s'\"<>]+", text)
+                return match.group(0) if match else ""
+
+            elif label == "html":
+                match = re.search(r"(<.*(?:</html>|</script>))", text, re.DOTALL | re.IGNORECASE)
+                return match.group(1) if match else ""
+
+            elif label == "js":
+                cleaned = text.replace("?", "")
+                cleaned = "".join(c for c in cleaned if c.isprintable() or c in "\n\r\t")
+                return cleaned.strip()
+
+            elif label == "eth":
+                match = re.search(r"0x[a-fA-F0-9]{40}", text)
+                return match.group(0) if match else ""
+
+            elif label == "ps":
+                cleaned = "".join(c for c in text if c.isprintable() or c in "\n\r\t")
+                return cleaned.strip()
+
+            return text
 
         cleaned = clean_text_by_label(raw_text, label)
 
         st.subheader("🧾 Cleaned Output")
         st.code(cleaned if cleaned else "[No valid pattern found]")
 
-        # Reset session defaults
-        st.session_state.setdefault("cleaned_text", cleaned)
-        st.session_state.setdefault("attention_tokens", [])
-        st.session_state.setdefault("attention_snippet", "")
-        st.session_state.setdefault("malicious_label", "unknown")
-        st.session_state.setdefault("malicious_score", 0.0)
-
+        # ================= MALICIOUS DETECTION =================
         st.subheader("🚨 Malicious Analysis")
 
         if not cleaned or len(cleaned) < 5:
             st.warning("Text too small for analysis")
-
         else:
             try:
+                # -------- LOAD MODEL BASED ON LABEL --------
                 if label in ["url", "js", "html", "ps"]:
-                    classifier = load_hf_pipeline(label)           # ✅ cached
+
+                    from transformers import pipeline
+
+                    model_map = {
+                        "url": "Arch11yad/url_malicious_detect",
+                        "js": "Arch11yad/js_malicious_detect",
+                        "html": "Arch11yad/HTML_Malicious_detect_y",
+                        "ps": "Arch11yad/powershell_final",
+                    }
+
+                    from transformers import pipeline
+
+                    hf_token = st.secrets["HF_TOKEN"]
+                    
+                    classifier = pipeline(
+                        "text-classification",
+                        model=model_map[label],
+                        token=hf_token
+                    )
+
                     result = classifier(cleaned[:512])[0]
-                    pred_label  = result["label"]
-                    confidence  = float(result["score"])
 
-                    st.success(f"Prediction: {pred_label}")
-                    st.write("Confidence:", round(confidence, 3))
-
-                    st.session_state["malicious_label"] = pred_label
-                    st.session_state["malicious_score"]  = confidence
-
-                    st.subheader("🔦 Important Tokens (Attention)")
-                    tokens_imp, all_tokens, idxs = get_attention_tokens(cleaned)
-                    snippet = build_snippet(all_tokens, idxs)
-
-                    st.write("Tokens:", tokens_imp)
-                    st.code(snippet)
-
-                    st.session_state["attention_tokens"]  = tokens_imp
-                    st.session_state["attention_snippet"] = snippet
+                    st.success(f"Prediction: {result['label']}")
+                    st.write("Confidence:", round(result["score"], 3))
 
                 elif label == "eth":
-                    st.info("Ethereum address detected — using ETH model")
+
+                    # -------- ETH FTTransformer --------
+                    class FTTransformer(nn.Module):
+                        def __init__(self, input_dim=1, d_model=64, n_heads=4, n_layers=2):
+                            super().__init__()
+                            self.embedding = nn.Linear(input_dim, d_model)
+
+                            encoder_layer = nn.TransformerEncoderLayer(
+                                d_model=d_model, nhead=n_heads, batch_first=True
+                            )
+
+                            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+
+                            self.fc = nn.Sequential(
+                                nn.Linear(d_model, 64),
+                                nn.ReLU(),
+                                nn.Linear(64, 2)
+                            )
+
+                        def forward(self, x):
+                            x = self.embedding(x)
+                            x = x.unsqueeze(1)
+                            x = self.transformer(x)
+                            x = x.mean(dim=1)
+                            return self.fc(x)
+
+                    eth_model = FTTransformer()
+                    eth_model.load_state_dict(torch.load("model/ethaddress_model.pth", map_location="cpu"))
+                    eth_model.eval()
 
                     x = torch.tensor([[len(cleaned)]], dtype=torch.float32)
+
                     with torch.no_grad():
-                        logits = eth_model(x)                      # ✅ cached
-                        probs  = torch.softmax(logits, dim=1)[0]
+                        logits = eth_model(x)
+                        probs = torch.softmax(logits, dim=1)[0]
 
                     pred = "Malicious" if probs[1] > 0.5 else "Safe"
+
                     st.success(f"Prediction: {pred}")
                     st.write("Confidence:", float(probs[1]))
-
-                    st.session_state["malicious_label"]   = pred
-                    st.session_state["malicious_score"]   = float(probs[1])
-                    st.session_state["attention_tokens"]  = []
-                    st.session_state["attention_snippet"] = ""
-
-                    st.info("No attention analysis for ETH")
 
                 else:
                     st.info("No model available for this type")
