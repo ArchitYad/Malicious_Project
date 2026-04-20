@@ -8,6 +8,8 @@ import re
 import joblib
 import cv2
 from PIL import Image
+from lime.lime_text import LimeTextExplainer
+import numpy as np
 
 # ==========================================
 # CONFIG
@@ -177,6 +179,34 @@ def analyze(path):
 
     return img, heatmap, lsb, prob
 
+def get_lime_explanation(text, classifier, class_names):
+
+    def predict_proba(texts):
+        results = classifier(texts)
+        
+        probs = []
+        for r in results:
+            # handle binary labels safely
+            if isinstance(r, list):
+                r = r[0]
+
+            if r["label"].lower() in ["malicious", "label_1"]:
+                probs.append([1 - r["score"], r["score"]])
+            else:
+                probs.append([r["score"], 1 - r["score"]])
+
+        return np.array(probs)
+
+    explainer = LimeTextExplainer(class_names=class_names)
+
+    exp = explainer.explain_instance(
+        text[:512],   # limit text
+        predict_proba,
+        num_features=10
+    )
+
+    words = [w for w, _ in exp.as_list()]
+    return words
 # ==========================================
 # TABS
 # ==========================================
@@ -278,28 +308,40 @@ with tab2:
                 if label in ["url", "js", "html", "ps"]:
 
                     from transformers import pipeline
-
+                
                     model_map = {
                         "url": "Arch11yad/url_malicious_detect",
                         "js": "Arch11yad/js_malicious_detect",
                         "html": "Arch11yad/HTML_Malicious_detect_y",
                         "ps": "Arch11yad/powershell_final",
                     }
-
-                    from transformers import pipeline
-
+                
                     hf_token = st.secrets["HF_TOKEN"]
-                    
+                
                     classifier = pipeline(
                         "text-classification",
                         model=model_map[label],
                         token=hf_token
                     )
-
+                
                     result = classifier(cleaned[:512])[0]
-
+                
                     st.success(f"Prediction: {result['label']}")
                     st.write("Confidence:", round(result["score"], 3))
+                
+                    # ===== LIME =====
+                    with st.spinner("Generating explanation..."):
+                        important_words = get_lime_explanation(
+                            cleaned,
+                            classifier,
+                            class_names=["benign", "malicious"]
+                        )
+                
+                    st.subheader("🧠 Important Words (LIME)")
+                    st.write(important_words)
+                
+                    # STORE FOR TAB3
+                    st.session_state["lime_words"] = important_words
 
                 elif label == "eth":
 
@@ -343,6 +385,8 @@ with tab2:
                     st.success(f"Prediction: {pred}")
                     st.write("Confidence:", float(probs[1]))
 
+                    st.info("ETH detected → skipping LIME")
+                    st.session_state["lime_words"] = []
                 else:
                     st.info("No model available for this type")
 
