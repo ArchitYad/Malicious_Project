@@ -179,34 +179,52 @@ def analyze(path):
 
     return img, heatmap, lsb, prob
 
-def get_lime_explanation(text, classifier, class_names):
+@st.cache_resource
+def load_classifier(label):
+    from transformers import pipeline
+
+    model_map = {
+        "url": "Arch11yad/url_malicious_detect",
+        "js": "Arch11yad/js_malicious_detect",
+        "html": "Arch11yad/HTML_Malicious_detect_y",
+        "ps": "Arch11yad/powershell_final",
+    }
+
+    return pipeline(
+        "text-classification",
+        model=model_map[label],
+        token=st.secrets["HF_TOKEN"]
+    )
+
+def get_lime_explanation(text, classifier):
 
     def predict_proba(texts):
-        results = classifier(texts)
-        
+        results = classifier(texts, truncation=True)
+
         probs = []
         for r in results:
-            # handle binary labels safely
             if isinstance(r, list):
                 r = r[0]
 
-            if r["label"].lower() in ["malicious", "label_1"]:
-                probs.append([1 - r["score"], r["score"]])
+            score = r["score"]
+
+            if "malicious" in r["label"].lower():
+                probs.append([1 - score, score])
             else:
-                probs.append([r["score"], 1 - r["score"]])
+                probs.append([score, 1 - score])
 
         return np.array(probs)
 
-    explainer = LimeTextExplainer(class_names=class_names)
+    explainer = LimeTextExplainer(class_names=["benign", "malicious"])
 
     exp = explainer.explain_instance(
-        text[:512],   # limit text
+        text[:300],        # 🔥 shorter text
         predict_proba,
-        num_features=10
+        num_features=6,    # 🔥 fewer words
+        num_samples=50     # 🔥 CRITICAL FIX (no freeze)
     )
 
-    words = [w for w, _ in exp.as_list()]
-    return words
+    return [w for w, _ in exp.as_list()]
 # ==========================================
 # TABS
 # ==========================================
@@ -304,44 +322,27 @@ with tab2:
             st.warning("Text too small for analysis")
         else:
             try:
-                # -------- LOAD MODEL BASED ON LABEL --------
                 if label in ["url", "js", "html", "ps"]:
 
-                    from transformers import pipeline
-                
-                    model_map = {
-                        "url": "Arch11yad/url_malicious_detect",
-                        "js": "Arch11yad/js_malicious_detect",
-                        "html": "Arch11yad/HTML_Malicious_detect_y",
-                        "ps": "Arch11yad/powershell_final",
-                    }
-                
-                    hf_token = st.secrets["HF_TOKEN"]
-                
-                    classifier = pipeline(
-                        "text-classification",
-                        model=model_map[label],
-                        token=hf_token
-                    )
-                
-                    result = classifier(cleaned[:512])[0]
-                
-                    st.success(f"Prediction: {result['label']}")
-                    st.write("Confidence:", round(result["score"], 3))
-                
-                    # ===== LIME =====
-                    with st.spinner("Generating explanation..."):
-                        important_words = get_lime_explanation(
-                            cleaned,
-                            classifier,
-                            class_names=["benign", "malicious"]
-                        )
-                
-                    st.subheader("🧠 Important Words (LIME)")
-                    st.write(important_words)
-                
-                    # STORE FOR TAB3
-                    st.session_state["lime_words"] = important_words
+                        classifier = load_classifier(label)
+                    
+                        result = classifier(cleaned[:512])[0]
+                    
+                        st.success(f"Prediction: {result['label']}")
+                        st.write("Confidence:", round(result["score"], 3))
+                    
+                        # ===== LIME (FIXED) =====
+                        with st.spinner("Generating explanation..."):
+                            try:
+                                important_words = get_lime_explanation(cleaned, classifier)
+                            except Exception as e:
+                                st.warning("LIME failed, fallback used")
+                                important_words = []
+                    
+                        st.subheader("🧠 Important Words (LIME)")
+                        st.write(important_words if important_words else "[No strong signals]")
+                    
+                        st.session_state["lime_words"] = important_words
 
                 elif label == "eth":
 
