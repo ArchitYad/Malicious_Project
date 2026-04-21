@@ -10,6 +10,8 @@ import cv2
 from PIL import Image
 from lime.lime_text import LimeTextExplainer
 import numpy as np
+from groq import Groq
+import json
 
 # ==========================================
 # CONFIG
@@ -199,7 +201,7 @@ def load_classifier(label):
 def get_lime_explanation(text, classifier):
 
     def predict_proba(texts):
-        results = classifier(texts, truncation=True)
+        results = classifier(texts)
 
         probs = []
         for r in results:
@@ -225,11 +227,63 @@ def get_lime_explanation(text, classifier):
     )
 
     return [w for w, _ in exp.as_list()]
+
+@st.cache_resource
+def load_groq():
+    return Groq(api_key=st.secrets["GROQ_API_KEY"])
+
+groq_client = load_groq()
+
+def build_prompt(cleaned, lime_words, prediction, confidence):
+
+    snippet = cleaned[:800]   # 🔥 keep it short
+
+    return f"""
+You are a cybersecurity malware analyst.
+
+Analyze the extracted content from a steganographic image.
+
+--- CLEANED TEXT (partial) ---
+{snippet}
+
+--- IMPORTANT WORDS (LIME) ---
+{lime_words}
+
+--- MODEL OUTPUT ---
+Prediction: {prediction}
+Confidence: {confidence}
+
+TASK:
+1. Identify attack type
+2. Explain what the attack does
+3. Give severity score (1–10)
+4. Suggest precautions
+
+Return ONLY JSON:
+
+{{
+  "attack_type": "...",
+  "severity_score": "...",
+  "what_it_does": "...",
+  "precautions": "..."
+}}
+"""
+
+def get_ai_report(cleaned, lime_words, prediction, confidence):
+
+    prompt = build_prompt(cleaned, lime_words, prediction, confidence)
+
+    response = groq_client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"}
+    )
+
+    return json.loads(response.choices[0].message.content)
 # ==========================================
 # TABS
 # ==========================================
-tab1, tab2 = st.tabs(["🔍 Image Analysis", "🧾 Clean Output"])
-
+tab1, tab2, tab3 = st.tabs(["🔍 Image Analysis", "🧾 Clean Output", "🤖 AI Report"])
 # ==========================================
 # TAB 1
 # ==========================================
@@ -327,8 +381,12 @@ with tab2:
                         classifier = load_classifier(label)
                     
                         result = classifier(cleaned[:512])[0]
-                    
-                        st.success(f"Prediction: {result['label']}")
+                        label_out = result["label"]
+                        if label_out.lower() in ["label_1", "malicious"]:
+                            label_out = "Malicious"
+                        else:
+                            label_out = "Benign"
+                        st.success(f"Prediction: {label_out}")
                         st.write("Confidence:", round(result["score"], 3))
                     
                         # ===== LIME (FIXED) =====
@@ -343,6 +401,9 @@ with tab2:
                         st.write(important_words if important_words else "[No strong signals]")
                     
                         st.session_state["lime_words"] = important_words
+                        st.session_state["cleaned_text"] = cleaned
+                        st.session_state["malicious_label"] = label_out
+                        st.session_state["malicious_score"] = result["score"]
 
                 elif label == "eth":
 
@@ -388,8 +449,88 @@ with tab2:
 
                     st.info("ETH detected → skipping LIME")
                     st.session_state["lime_words"] = []
+                    st.session_state["cleaned_text"] = cleaned
+                    st.session_state["malicious_label"] = pred
+                    st.session_state["malicious_score"] = float(probs[1])
                 else:
                     st.info("No model available for this type")
 
             except Exception as e:
                 st.error(f"Detection failed: {str(e)}")
+
+with tab3:
+
+    if "cleaned_text" not in st.session_state:
+        st.warning("⚠️ Run Tab 2 first")
+    else:
+
+        cleaned = st.session_state.get("cleaned_text", "")
+        lime_words = st.session_state.get("lime_words", [])
+        prediction = st.session_state.get("malicious_label", "unknown")
+        confidence = st.session_state.get("malicious_score", 0.0)
+
+        # truncate
+        cleaned = cleaned[:800]
+        lime_words = lime_words[:10]
+
+        # ================= HEADER =================
+        st.markdown("## 🤖 AI Forensic Report Dashboard")
+
+        # ================= SUMMARY CARDS =================
+        col1, col2 = st.columns(2)
+
+        # Risk color logic
+        if prediction.lower() in ["malicious", "label_1"]:
+            risk_color = "🔴 High Risk"
+        else:
+            risk_color = "🟢 Low Risk"
+
+        col1.metric("Prediction", prediction)
+        col2.metric("Confidence", f"{confidence:.2f}")
+
+        st.markdown(f"### Risk Level: {risk_color}")
+
+        # ================= LIME WORDS =================
+        st.markdown("### 🧠 Important Indicators")
+        if lime_words:
+            st.write(" | ".join([f"`{w}`" for w in lime_words]))
+        else:
+            st.info("No strong indicators found")
+
+        # ================= CLEAN TEXT PREVIEW =================
+        with st.expander("📄 View Extracted Text (Partial)"):
+            st.code(cleaned if cleaned else "[No data]")
+
+        # ================= AI REPORT =================
+        st.markdown("### 🔍 AI Analysis")
+
+        if not cleaned:
+            st.warning("No cleaned text available")
+        else:
+            with st.spinner("Analyzing threat..."):
+                try:
+                    report = get_ai_report(
+                        cleaned,
+                        lime_words,
+                        prediction,
+                        confidence
+                    )
+
+                    st.success("Analysis Complete")
+
+                    # ===== BEAUTIFUL OUTPUT =====
+                    st.markdown("### 🛡️ Threat Details")
+
+                    colA, colB = st.columns(2)
+
+                    colA.markdown(f"**Attack Type:**  \n{report.get('attack_type','-')}")
+                    colB.markdown(f"**Severity Score:**  \n{report.get('severity_score','-')} / 10")
+
+                    st.markdown("### ⚙️ What the Attack Does")
+                    st.info(report.get("what_it_does", "-"))
+
+                    st.markdown("### 🧯 Recommended Precautions")
+                    st.success(report.get("precautions", "-"))
+
+                except Exception as e:
+                    st.error(f"Failed to generate report: {str(e)}")
